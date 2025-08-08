@@ -1,0 +1,39 @@
+// island_split.slim
+initialize() {
+    initializeTreeSeq();
+    initializeMutationRate(0.0); // we'll add mutations in msprime
+    initializeMutationType("m1", 0.5, "f", 0.0);
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeGenomicElement(g1, 0, 1e7);
+    initializeRecombinationRate(1e-6);
+}
+
+1 early() {
+    defineConstant("N", 1000);
+    defineConstant("n_pops", 8);
+    defineConstant("m", 0.001 / 7);
+
+    sim.addSubpop(0, N * n_pops);  // Ancestral population
+}
+
+2000 early() {
+    for (i in 1:n_pops) {
+        sim.addSubpopSplit(i, N, p0);  // Derived populations
+    }
+    sim.subpopulations[0].setSubpopulationSize(0);  // Remove ancestral
+}
+
+2001 late() {
+    for (i in 1:n_pops) {
+        for (j in 1:n_pops) {
+            if (i != j) {
+                sim.subpopulations[i-1].setMigrationRates(j, m);
+            }
+        }
+    }
+}
+
+5000 late() {
+    sim.treeSeqOutput("island_" + SEED + ".trees");
+    sim.simulationFinished();
+}

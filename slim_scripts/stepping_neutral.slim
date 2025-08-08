@@ -1,0 +1,53 @@
+// set up a simple neutral simulation for QTL
+initialize() {
+	// Initialize global variable to avoid repetition
+	defineGlobal("N", 1000); // population size
+	defineGlobal("L", 1e7); // genome size (10m pb)
+	defineGlobal("subpopCount", 8); // total sub population
+	
+	// Initialize 
+	initializeMutationType("m1", 0.5, "f", 0.0); // neutral mutation (type m1)
+	initializeGenomicElementType("g1", m1, 1.0); // create a genomic element name g1, 
+	initializeGenomicElement(g1, 0, L); // large genome : 10 million pb
+	initializeMutationRate(0.0);
+    initializeRecombinationRate(1e-6);
+	initializeTreeSeq();
+	
+}
+
+// create stepping stone model of 8 subpopulations with 1000 individuals
+1 early() {
+	// save this run's identifier, used to save and restore
+	sim.addSubpop(0, N * subpopCount); // large panmictic ancestral population
+
+	
+}
+// Burn-in period: let the population evolve without tree sequence tracking
+2000 late() {
+   print("Splitting ancestral population into 8 subpops...");
+
+    // Split ancestral into 8 derived populations
+    for (i in 1:subpopCount) {
+    sim.addSubpopSplit(i, N, p0); // Create populations 1 to 8
+}
+sim.subpopulations[0].setSubpopulationSize(0);  // Remove ancestral (ID 0)
+    
+}
+
+2001 late() {
+    print("Setting stepping-stone migration...");
+
+   for (i in 2:subpopCount) {
+		sim.subpopulations[i-1].setMigrationRates(i-1, 0.001);
+		} 
+	for (i in 1:(subpopCount-1)) {
+		sim.subpopulations[i-1].setMigrationRates(i+1, 0.001);
+    }
+    
+}
+
+// output genomes samples of all our populations 
+5000 late() { 
+	sim.treeSeqRememberIndividuals(sim.subpopulations.individuals);
+   sim.treeSeqOutput("stepping_" +SEED+ ".trees");
+}
