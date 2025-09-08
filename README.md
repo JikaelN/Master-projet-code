@@ -75,7 +75,7 @@ module load R/4.3.1
 Rscript -e 'install.packages(c("tidyverse","vcfR","boot","VGAM"))'
 ```
 
-###Usage
+### Usage
 
 1. Run Simulations
 
@@ -95,48 +95,32 @@ Or submit arrays on SLURM:
 bash scripts/run\_slim\_batch.sh
 ```
 
-
 2\. Process Tree Sequences → VCF
-
+```bash
 bash scripts/run\_batch\_vcf.sh
-
-
+```
 
 3\. Qst–Fst Analysis
 
-
-
-Run a single replicate:
-
-
-
+**Run a single replicate:**
+```bash
 bash scripts/run\_one\_qst.sh
-
-
-
-
+```
 
 Or submit in parallel:
-
-
-
+```bash
 bash scripts/run\_qst\_fst.sh
-
-
+```
 
 4\. Visualization and Results
 
-
-
-Open the R Markdown file for figure generation and summary statistics:
-
-
-
+**Open the R Markdown file for figure generation and summary statistics:**
+```bash
 rmarkdown::render("scripts/Full\_code\_analysis\_Qst\_Fst.Rmd")
+```
 
 
-
-Authors \& Affiliations
+## Authors \& Affiliations
 
 * Author: Jikaël Ntoko, University of Lausanne (UNIL)
 * Contributor (algorithmic component): Isabela Do’Ò (original algorithm adapted and extended)
