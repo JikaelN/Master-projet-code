@@ -1,82 +1,65 @@
-Qst–Fst Comparative Analysis under Neutral and Quantitative Trait Simulations
+# Qst–Fst Comparative Analysis under Neutral and Quantitative Trait Simulations
 
-Overview
+## Overview
 
+This repository contains the full pipeline used to simulate, process, and analyze genetic data for comparing **Qst and Fst estimates** under different population structures and genetic architectures. The workflow combines:
 
-
-This repository contains the full pipeline used to simulate, process, and analyze genetic data for comparing Qst and Fst estimates under different population structures and genetic architectures. The workflow combines forward-time simulations (SLiM), tree sequence processing (Python), and quantitative trait analysis (R).
-
-
+- **Forward-time simulations (SLiM)**
+- **Tree sequence processing (Python)**
+- **Quantitative trait analysis (R)**
 
 The repository provides:
 
+- SLiM scripts for simulating *island* and *stepping-stone* models.  
+- Python scripts to process simulated tree sequences into VCFs with added mutations and founder sampling.  
+- R code implementing the **Guillaume–Whitlock (GW) framework** for Qst estimation and statistical testing.  
+- Shell scripts for automated and parallelized execution on HPC clusters (SLURM).  
+
+---
+
+## Repository Structure
 
 
-SLiM scripts for simulating island and stepping-stone models.
-
-
-
-Python scripts to process simulated tree sequences into VCFs with added mutations and founder sampling.
-
-
-
-R code implementing the Guillaume–Whitlock (GW) framework for Qst estimation and statistical testing.
-
-
-
-Shell scripts for automated and parallelized execution on HPC clusters (SLURM).
-
-
-
-Repository Structure
-
-├── scripts/                          # Core pipeline code
-
-│   ├── Full\_code\_analysis\_Qst\_Fst.Rmd   # Analysis and visualization of final results
-
-│   ├── GW\_Qst\_Fst.r                     # Main algorithm (Guillaume–Whitlock framework)
-
-│   ├── process\_stepping\_tree.py         # Tree → VCF (stepping-stone model)
-
-│   ├── process\_tree\_island.py           # Tree → VCF (island model)
-
-│   ├── run\_batch\_vcf.sh                 # Parallel VCF processing launcher
-
-│   ├── run\_one\_vcf.sh                   # Single execution of tree → VCF
-
-│   ├── run\_one\_seed.sh                  # Single SLiM simulation run
-
-│   ├── run\_slim\_batch.sh                # Array job: multiple SLiM simulations
-
-│   ├── run\_one\_qst.sh                   # Single Qst–Fst analysis (R)
-
-│   ├── run\_qst\_fst.sh                   # Batch Qst–Fst analysis (SLURM array)
-
+├── scripts/ # Core pipeline code
+│ ├── Full_code_analysis_Qst_Fst.Rmd # Analysis and visualization of final results
+│ ├── GW_Qst_Fst.r # Main algorithm (Guillaume–Whitlock framework)
+│ ├── process_stepping_tree.py # Tree → VCF (stepping-stone model)
+│ ├── process_tree_island.py # Tree → VCF (island model)
+│ ├── run_batch_vcf.sh # Parallel VCF processing launcher
+│ ├── run_one_vcf.sh # Single execution of tree → VCF
+│ ├── run_one_seed.sh # Single SLiM simulation run
+│ ├── run_slim_batch.sh # Array job: multiple SLiM simulations
+│ ├── run_one_qst.sh # Single Qst–Fst analysis (R)
+│ ├── run_qst_fst.sh # Batch Qst–Fst analysis (SLURM array)
 │
-
-├── slim\_script/                      # Forward simulations in SLiM
-
-│   ├── island\_neutral.slim              # Island model simulation
-
-│   ├── stepping\_neutral.slim            # Stepping-stone model simulation
+├── slim_script/ # Forward simulations in SLiM
+│ ├── island_neutral.slim # Island model simulation
+│ ├── stepping_neutral.slim # Stepping-stone model simulation
 
 
+I
+---
 
-Installation
+## Installation
 
-Requirements
+### Requirements
 
-
-
-* SLiM 4+ (forward-time population genetic simulator)
-
-
-
-* Python 3.9+ with: tskit, pyslim, msprime, numpy, pandas
+- **SLiM 4+** (forward-time population genetic simulator)  
+- **Python 3.9+** with:  
+  - `tskit`, `pyslim`, `msprime`, `numpy`, `pandas`  
+- **R (≥ 4.2)** with:  
+  - `tidyverse`, `hierfstat`, `JGTeach`, `vcfR`, `gaston`, `VGAM`, `boot`  
 
 
+```bash
+# Python environment
+conda create -n qstfst python=3.10 numpy pandas pyslim tskit msprime
+conda activate qstfst
 
-* R (≥ 4.2) with: tidyverse, hierfstat, JGTeach, vcfR, gaston, VGAM, boot
+# R environment (example)
+module load R/4.3.1
+Rscript -e 'install.packages(c("tidyverse","vcfR","boot","VGAM"))'
+
 
 
 
