@@ -123,4 +123,4 @@ rmarkdown::render("scripts/Full\_code\_analysis\_Qst\_Fst.Rmd")
 ## Authors \& Affiliations
 
 * Author: Jikaël Ntoko, University of Lausanne (UNIL)
-* Contributor (algorithmic component): Isabela Do’Ò (original algorithm adapted and extended)
+* Contributor (algorithmic component): Isabela Do’Ò (original algorithm (Whitlock and Guillaume implementation))
