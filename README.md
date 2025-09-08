@@ -73,42 +73,27 @@ conda activate qstfst
 # R environment (example)
 module load R/4.3.1
 Rscript -e 'install.packages(c("tidyverse","vcfR","boot","VGAM"))'
+```
 
-
-
-
-Usage
+###Usage
 
 1. Run Simulations
 
-\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
 
-Island model example:
-
-
-
+**Island model example:**
+```bash
 slim slim\_script/island\_neutral.slim
+```
 
-
-
-
-
-Stepping-stone model:
-
-
-
+**Stepping-stone model:**
+```bash
 slim slim\_script/stepping\_neutral.slim
-
-
-
-
+```
 
 Or submit arrays on SLURM:
-
-
-
+```bash
 bash scripts/run\_slim\_batch.sh
-
+```
 
 
 2\. Process Tree Sequences → VCF
