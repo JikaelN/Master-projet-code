@@ -64,6 +64,7 @@ I
 - **R (≥ 4.2)** with:  
   - `tidyverse`, `hierfstat`, `JGTeach`, `vcfR`, `gaston`, `VGAM`, `boot`  
 
+**This pipeline is designed for HPC clusters running SLURM; adaptation may be needed for local execution**
 
 ```bash
 # Python environment
