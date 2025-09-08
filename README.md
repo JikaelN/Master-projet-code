@@ -24,7 +24,7 @@ The repository provides:
 
 │ ├── Full_code_analysis_Qst_Fst.Rmd # Analysis and visualization of final results
 
-│ ├── GW_Qst_Fst.r # Main algorithm (Guillaume–Whitlock framework)
+│ ├── GW_Qst_Fst.r # Main algorithm (Guillaume–Whitlock framework) adapted by Jikaël Ntoko
 
 │ ├── process_stepping_tree.py # Tree → VCF (stepping-stone model)
 
