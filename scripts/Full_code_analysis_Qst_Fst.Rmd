@@ -1,0 +1,1075 @@
+---
+title: "Full_code_analysis_Qst_Fst"
+author: "Jikaël Ntoko"
+date: "2025-09-05"
+output: html_document:
+  toc: true
+  toc_depth: 3
+  number_sections: true
+  df_print: paged
+description: >
+  This document analyses QST–FST simulation results for the Island model.
+  It compares MAF-filtered and unfiltered datasets, produces summary statistics,
+  visualizations, false positive rates, and direction of selection tests.
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+## Library import and directory path
+```{r}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width = 9, fig.height = 5)
+
+# Core libraries
+library(readr)       # read_csv
+library(dplyr)       # data wrangling
+library(ggplot2)     # plotting
+library(purrr)       # map, discard
+library(tidyr)       # pivot, unnest
+library(glue)        # glue()
+library(stringr)     # string helpers
+library(digest)      # digest() for hashes
+library(binom)       # binom.confint
+
+
+# Colorblind-friendly palette (Okabe & Ito)
+okabe_ito <- c("#009E73", "#F0E442", "#0072B2",
+               "#D55E00", "#CC79A7", "#000000")
+
+okabe_ito_named <- c(
+  "Unfiltered"    = "#E69F00",
+  "MAF_filtered"  = "#56B4E9",
+  "unfiltered"    = "#E69F00",
+  "maf_filtered"  = "#56B4E9"
+)
+
+# Paths (EDIT as needed)
+wd       <- "C:/Users/SwissHardware/Desktop/Master-Project/R_analysis/"
+base_dir <- file.path(wd, "500_rep_final/island/base_test")
+result_dir  <- file.path(base_dir, "results_2")
+dir.create(result_dir, showWarnings = FALSE, recursive = TRUE)
+
+model <- "Island"
+```
+
+## Helpers
+This section defines helper functions for:
+  - Listing input files in the results directories
+  - Parsing metadata from filenames
+  - Reading main result files
+  - Reading QST component files
+
+These functions allow reproducible extraction of simulation metadata
+and consistent loading of results into data frames. 
+```{r}
+# --- separate lists of files : one for results, one for QST components ---
+#' Get input file lists from directory
+#'
+#' @param data_dir Path to directory containing results and component files
+#' @return A list with two elements:
+#'   - results_files: vector of file paths for main results
+#'   - components_files: vector of file paths for QST component files
+get_files <- function(data_dir) {
+  results_files <- list.files(data_dir, pattern =  "\\.csv$", full.names = TRUE) %>%
+    discard( ~ str_detect(.x, "allele_freq|coeff|effect|QST_components"))
+  
+  compoenents_files <- list.files(data_dir, pattern = "QST_components.*\\.csv$", full.names = TRUE)
+  
+  
+  
+  return(list(
+    results_files = results_files,
+    components_files = compoenents_files
+  ))
+  
+}
+
+
+#' Parse metadata from filename
+#'
+#' Extracts maf_filter, architecture, effect distribution, and loci count
+#' from the filename.
+#'
+#' @param filename string, full path to file
+#' @return tibble with metadata columns
+parse_filename <- function(filename){
+  # extract metadata from filename
+  fname <- basename(filename)
+  print(fname)
+  maf_filter <- ifelse(str_detect(fname, "maf_filtered"), "MAF_filtered", "Unfiltered")
+  architecture <- case_when(
+    str_detect(fname, "Epistatic") ~ "Epistatic",
+    str_detect(fname, "Recessive") ~ "Recessive",
+    str_detect(fname, "Dominance") ~ "Dominance",
+    str_detect(fname, "Additive") ~ "Additive",
+    TRUE ~ "Other"
+  )
+  effect_dist <- str_extract(fname, "(Normal|L|Uniform|Inverse)")
+  loci_raw <- str_extract(fname, "(?<=_)\\d+(?=_loci)")
+  loci <- as.numeric(str_extract(fname, "(?<=_)\\d+(?=_loci)")) %>% 
+    str_remove("_loci")
+  
+  tibble(
+    file = filename,
+    maf_filter = maf_filter,
+    architecture = architecture,
+    effect_dist = effect_dist,
+    loci = loci
+  )
+}
+
+#' Read main results file
+#'
+#' Loads QST/FST results from a CSV and attaches metadata.
+#'
+#' @param row Row from metadata tibble (one file).
+#' @return Tibble with results + metadata and derived variables.
+result_reader <- function(row) {
+  read_csv(row$file, show_col_types = FALSE) %>%
+    mutate(
+      maf_filter = row$maf_filter,
+      architecture = row$architecture,
+      effect_dist = row$effect_dist,
+      loci = row$loci,
+      QST = estimated_QST,
+      FST = estimated_FST,
+      Qst_minus_Fst = QST - FST,
+      significant = p_value < 0.05,
+      significant_positive = p_value_pos  < 0.05,
+      significant_negative = p_value_neg < 0.05
+    )
+}
+
+#' Read QST components file
+#'
+#' Loads QST component values (e.g., within- and between-pop variance).
+#'
+#' @param row Row from metadata tibble (one file).
+#' @return Tibble with QST components + metadata.
+components_reader <- function(row) {
+  read_csv(row$file, show_col_types = FALSE) %>%
+    mutate(
+      maf_filter = row$maf_filter,
+      architecture = row$architecture,
+      effect_dist = row$effect_dist,
+      loci = row$loci
+    )
+}
+
+```
+
+# Island model
+##Load and tidy Island data
+In this section we:
+1. Collect metadata from filenames (architecture, loci, effect distribution, filtering).
+2. Load main results data from CSV files.
+3. Remove potential duplicate replicates.
+4. Store the cleaned dataset into `island_results$full_data` for downstream analyses.
+
+```{r}
+setwd(wd)  # Set working directory (defined earlier in Setup)
+island_results <- list()
+island_data_dir <- base_dir  # Directory containing Island simulation outputs
+
+# 1. Load metadata from filenames
+island_results$metadata <- map_df(
+  get_files(island_data_dir)$results_files,
+  parse_filename
+)
+
+# 2. Load results data using metadata (attach QST/FST values + derived columns)
+island_results$data <- map_dfr(
+  split(island_results$metadata, seq_len(nrow(island_results$metadata))),
+  result_reader
+)
+
+# 3. Remove duplicate replicate entries (if present)
+#    Ensures each replicate × condition appears only once.
+island_results$data <- island_results$data %>%
+  distinct(replicate_number, maf_filter, architecture, effect_dist, loci, .keep_all = TRUE)
+
+# 4. Store cleaned full dataset
+island_results$full_data <- island_results$data
+
+# Quick inspection of structure
+glimpse(island_results$full_data)
+
+# Export full summary as CSV (for backup and reproducibility)
+write.csv(
+  island_results$full_data,
+  file = file.path(result_dir, glue("{model}_full_summary.csv")),
+  row.names = FALSE
+)
+
+```
+
+## Neutral Fst : with/without MAF
+### Data
+
+Objective:
+commpare neutral FST estimates between datasets with and without MAF filtering.
+We use only the "Additive" architecture with "Normal" effect size distribution,
+because these settings yield neutral simulations (baseline expectation).
+
+Steps:
+   1. Subset data to Additive + Normal.
+   2. Summarise FST by filtering status (mean, sd, min, max).
+   3. Visualise distribution of FST across replicates with histograms.
+```{r}
+add_normal <- island_results$full_data |> filter(architecture == "Additive", effect_dist == "Normal")
+
+fst_summary <- add_normal |>
+  group_by(maf_filter) |>
+  summarise(
+    mean_FST = mean(FST, na.rm = TRUE),
+    sd_FST   = sd(FST,   na.rm = TRUE),
+    min_FST  = min(FST,  na.rm = TRUE),
+    max_FST  = max(FST,  na.rm = TRUE),
+    .groups = "drop"
+  )
+knitr::kable(fst_summary, caption = glue("{model} model: FST summary by MAF filtering (Additive, Normal effects)"))
+```
+Note: Take only Additive value and Normal effect size distribution as it was the
+same value used for each replicate for other scenarios.
+
+### Plot
+```{r}
+# 3. Plot histogram of FST distributions
+additive_data <- island_results$full_data %>%
+  filter(architecture == "Additive", effect_dist == "Normal")
+
+fst_summary_by_maf <- additive_data %>%
+  group_by(maf_filter) %>%
+  summarise(mean_fst = mean(estimated_FST),
+            sd_fst   = sd(estimated_FST),
+            min_fst  = min(estimated_FST),
+            max_fst  = max(estimated_FST),
+            .groups = "drop")
+fst_summary_by_maf
+
+# Histogram
+p_fst <- ggplot(additive_data, aes(x = estimated_FST, fill = maf_filter)) +
+  geom_histogram(bins = 50, alpha = 0.6, position = "identity", color = "black") +
+  scale_fill_manual(values = okabe_ito_named) +
+  labs(
+    title    = glue("{model}: Neutral Fst Distribution Across Replicates"),
+    subtitle = "Additive architecture, Normal effect sizes",
+    x        = "Fst",
+    y        = "Number of replicates",
+    fill     = "MAF filtering"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title    = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size = 14, face = "italic"),
+    axis.title    = element_text(size = 16, face = "bold"),
+    axis.text     = element_text(size = 13),
+    legend.title  = element_text(size = 14, face = "bold"),
+    legend.text   = element_text(size = 12),
+    strip.text    = element_text(size = 13, face = "bold")
+  )
+
+p_fst
+ggsave(file.path(result_dir, glue("{model}_Neutral_Fst_Distribution.png")),
+       plot = p_fst, width = 12, height = 8, dpi = 600)
+
+```
+Note: Under the 8-deme island model, the theoretical expectation is Fst ≈ 0.178.
+Stepping ~0.22
+In our simulations, MAF filtering inflated FST while unfiltered estimates were 
+slightly deflated (means and ranges shown in the table).
+
+## Qst Analysis
+```{r}
+# Objective:
+#   Explore the distribution of QST estimates across architectures,
+#   effect size distributions, and number of loci.
+#
+# Steps:
+#   1. Subset data to "Normal" and "L-shaped" effect size distributions.
+#   2. Summarise QST statistics (mean, sd, median, min, max).
+#   3. Produce violin + boxplot visualisations of QST distributions
+#      (restricted here to Unfiltered datasets).
+#   4. Export summary table and figure for downstream reporting.
+
+
+# 1. Filter to Normal and L-shaped effect distributions
+filtered_qst_data <- island_results$full_data %>%
+  filter(effect_dist %in% c("Normal", "L")) %>%
+  mutate(
+    loci = factor(loci, levels = c("1", "2", "5", "10", "100", "1000"))
+  )
+
+# 2. Summary statistics of QST
+qst_summary_stats <- filtered_qst_data %>%
+  group_by(maf_filter, architecture, effect_dist, loci) %>%
+  summarise(
+    mean_qst   = mean(QST, na.rm = TRUE),
+    sd_qst     = sd(QST, na.rm = TRUE),
+    median_qst = median(QST, na.rm = TRUE),
+    min_qst    = min(QST, na.rm = TRUE),
+    max_qst    = max(QST, na.rm = TRUE),
+    .groups    = "drop"
+  )
+
+# Save QST summary stats
+write.csv(
+  qst_summary_stats,
+  file = file.path(result_dir, "qst_summary_stats.csv"),
+  row.names = FALSE
+)
+
+# 3. Visualisation: violin plots (Unfiltered data only)
+plot_data <- filtered_qst_data %>%
+  # Cap extreme values for readability in plots
+  mutate(QST_capped = pmax(pmin(QST, 1), -0.5)) %>%
+  filter(maf_filter == "Unfiltered")
+
+p_qst <- ggplot(plot_data, aes(x = architecture, y = QST_capped,
+                               fill = architecture, color = architecture)) +
+  geom_violin(trim = FALSE, scale = "width", adjust = 1.5, alpha = 0.7) +
+  geom_boxplot(width = 0.1, outlier.shape = NA) +
+  facet_grid(rows = vars(effect_dist), cols = vars(loci), labeller = label_both) +
+  scale_fill_manual(values = okabe_ito) +
+  scale_color_manual(values = okabe_ito) +
+  labs(
+    title    = glue("{model}: Qst Distributions by Architecture"),
+    subtitle = "Effect size distribution (rows) × Number of QTLs (columns)",
+    x        = "Genetic architecture",
+    y        = "Qst (capped between -0.5 and 1)"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title    = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size = 14, face = "italic"),
+    axis.title    = element_text(size = 16, face = "bold"),
+    axis.text.x   = element_text(angle = 90, size = 10, vjust = 0.5, hjust = 1),
+    axis.text.y   = element_text(size = 13),
+    strip.text    = element_text(size = 13, face = "bold"),
+    legend.position = "none"
+  )
+
+p_qst
+ggsave(file.path(result_dir, glue("{model}_Qst_Distribution.png")),
+       plot = p_qst, width = 12, height = 8, dpi = 600)
+
+```
+
+
+## P-value histograms
+```{r}
+# Objective:
+#   Assess the distribution of p-values across different architectures,
+#   effect size distributions, and MAF filtering conditions.
+#
+# Why:
+#   - Under neutrality, p-values should follow a uniform(0,1) distribution.
+#   - Deviations (e.g. excess near 0 or 1) can indicate bias or inflation of false positives.
+#
+# Steps:
+#   1. Create output folder for plots.
+#   2. Ensure maf_filter values are consistent (lowercase for plotting).
+#   3. Loop over architecture × effect_dist combinations.
+#   4. Plot histograms of p-values (faceted by loci and filtering).
+#   5. Save plots as PNG in results directory.
+# 1. Create output folder
+dir.create(file.path(result_dir, "pval_histograms"), showWarnings = FALSE)
+
+# 2. Harmonise maf_filter values (lowercase ensures consistency in mapping)
+filtered_qst_data$maf_filter <- tolower(as.character(filtered_qst_data$maf_filter))
+
+# Define consistent color palette for filtering
+colors <- c("maf_filtered" = "#0072B2", "unfiltered" = "#D55E00")
+
+# 3. Identify unique facet keys (architecture × effect distribution)
+facet_keys <- filtered_qst_data %>%
+  distinct(architecture, effect_dist)
+
+# 4. Loop over combinations and generate histograms
+for (i in seq_len(nrow(facet_keys))) {
+  
+  arch   <- facet_keys$architecture[i]
+  effect <- facet_keys$effect_dist[i]
+  
+  # Subset data for current combination
+  subset_data <- filtered_qst_data %>%
+    filter(architecture == arch,
+           effect_dist == effect,
+           !is.na(p_value))
+  
+  # Skip if no data
+  if (nrow(subset_data) == 0) next
+  
+  # Build plot
+p <- ggplot(subset_data, aes(x = p_value, fill = maf_filter)) +
+    geom_histogram(breaks = seq(0, 1, by = 0.05),
+                   aes(y = ..density..), color = "black", alpha = 0.7) +
+    facet_grid(rows = vars(maf_filter), cols = vars(loci), labeller = label_both) +
+    scale_fill_manual(values = colors) +
+    geom_hline(yintercept = 1, linetype = "dashed", color = "gray40") +
+    labs(
+      title    = glue("{model}: p-value Distributions"),
+      subtitle = glue("Architecture: {arch} | Effect size: {effect}"),
+      x        = "p-value",
+      y        = "Density",
+      fill     = "Filtering"
+    ) +
+    theme_bw(base_size = 14) +
+    theme(
+      plot.title    = element_text(size = 18, face = "bold"),
+      plot.subtitle = element_text(size = 14, face = "italic"),
+      axis.title    = element_text(size = 16, face = "bold"),
+      axis.text.x   = element_text(angle = 45, size = 10, hjust = 1),
+      axis.text.y   = element_text(size = 12),
+      strip.text    = element_text(size = 13, face = "bold"),
+      legend.title  = element_text(size = 14, face = "bold"),
+      legend.text   = element_text(size = 12)
+    )
+  
+  p
+  ggsave(file.path(result_dir, "pval_histograms",
+                   str_replace_all(glue("{model}_{arch}_{effect}_facet_hist.png"), "[^[:alnum:]_.]", "_")),
+         plot = p, width = 12, height = 6, dpi = 600)
+}
+```
+
+## False positive rates (normal effect)
+```{r}
+# Objective:
+#   Evaluate the rate of false positives (p < 0.05) in Qst–Fst comparisons
+#   under neutrality, focusing on "Normal" effect size distributions.
+#
+# Why:
+#   - Under a well-calibrated test, ~5% of results should be significant at α = 0.05.
+#   - Deviations indicate inflation or deflation of type I error.
+#
+# Steps:
+#   1. Filter dataset to Normal effect sizes.
+#   2. Compute proportion of significant results (p < 0.05) by maf_filter × architecture × loci.
+#   3. Add Wilson confidence intervals for binomial proportions.
+#   4. Plot results for Additive (main focus) and all architectures (supplementary).
+#   5. Export plots for reporting.
+
+# 1. Filter to Normal effect sizes
+normal_summary <- filtered_qst_data %>%
+  filter(effect_dist == "Normal") %>%
+  mutate(significant = p_value < 0.05) %>%
+  group_by(maf_filter, architecture, loci) %>%
+  summarise(
+    n     = n(),
+    n_sig = sum(significant),
+    prop  = n_sig / n,   # proportion of significant results
+    .groups = "drop"
+  ) %>%
+  # 2. Compute Wilson confidence intervals
+  rowwise() %>%
+  mutate(
+    ci = list(binom.confint(n_sig, n, method = "wilson"))
+  ) %>%
+  unnest_wider(ci, names_sep = "_")
+
+# 3. Extract additive architecture only (main figure)
+additive_summary <- normal_summary %>%
+  filter(architecture == "Additive", maf_filter == "unfiltered")
+
+# Plot: Additive case (main result)
+p_additive <- ggplot(normal_summary %>% filter(architecture == "Additive"),
+                     aes(x = loci, y = prop, group = maf_filter, color = maf_filter)) +
+  geom_point(size = 3) +
+  geom_line() +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  scale_color_manual(values = okabe_ito_named) +
+  labs(
+    title    = glue("{model}: False Positive Rate in Qst–Fst Comparisons"),
+    subtitle = "Normal effect sizes (Additive architecture)\nDashed line = expected type I error (0.05)",
+    x        = "Number of QTLs",
+    y        = "Proportion of false positives",
+    color    = "Dataset"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title    = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 14, face = "italic"),
+    axis.title    = element_text(size = 16, face = "bold"),
+    axis.text     = element_text(size = 13),
+    legend.title  = element_text(size = 14, face = "bold"),
+    legend.text   = element_text(size = 12),
+    strip.text    = element_text(size = 13, face = "bold")
+  )
+
+p_additive
+ggsave(file.path(result_dir, glue("{model}_Figure_Main_Additive_FPR_Normal.png")),
+       plot = p_additive, width = 7, height = 5, dpi = 600)
+
+
+p_all_architectures <- ggplot(normal_summary,
+                              aes(x = loci, y = prop, group = maf_filter, color = maf_filter)) +
+  geom_point(size = 2) +
+  geom_line() +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  facet_grid(rows = vars(architecture), cols = vars(maf_filter)) +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  scale_color_manual(values = okabe_ito_named) +
+  labs(
+    title    = glue("{model}: False Positive Rate in Qst–Fst Comparisons by Architecture"),
+    subtitle = "Normal effect sizes\nDashed line = expected type I error (0.05)",
+    x        = "Number of QTLs",
+    y        = "Proportion of false positives",
+    color    = "Dataset"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title    = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 14, face = "italic"),
+    axis.title    = element_text(size = 16, face = "bold"),
+    axis.text     = element_text(size = 12),
+    legend.title  = element_text(size = 14, face = "bold"),
+    legend.text   = element_text(size = 12),
+    strip.text    = element_text(size = 13, face = "bold")
+  )
+
+p_all_architectures
+ggsave(file.path(result_dir, glue("{model}_Supplementary_AllArchitectures_FPR_Normal.png")),
+       plot = p_all_architectures, width = 12, height = 8, dpi = 600)
+```
+## False positive rate (l-shaped effect)
+```{r}
+# Objective:
+#   Quantify false positive rates (p < 0.05) in Qst–Fst comparisons
+#   when effect sizes follow an L-shaped distribution.
+#
+# Why:
+#   - As with Normal effects, the expected type I error is 5%.
+#   - L-shaped distributions generate more rare alleles and can influence
+#     the calibration of Qst–Fst tests, making this case particularly important.
+#
+# Steps:
+#   1. Filter dataset to L-shaped effect sizes.
+#   2. Compute proportion of significant results (p < 0.05) by maf_filter × architecture × loci.
+#   3. Add Wilson confidence intervals for binomial proportions.
+#   4. Plot results for Additive (main focus) and all architectures (supplementary).
+#   5. Export plots for reporting.
+
+# 1. Filter for L-shaped effect sizes
+lshaped_data <- filtered_qst_data %>%
+  filter(effect_dist == "L") %>%
+  mutate(significant = p_value < 0.05)
+
+# 2. Compute proportions and confidence intervals
+lshaped_summary <- lshaped_data %>%
+  group_by(maf_filter, architecture, loci) %>%
+  summarise(
+    n     = n(),
+    n_sig = sum(significant),
+    prop  = n_sig / n,   # proportion of significant results
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    ci = list(binom.confint(n_sig, n, method = "wilson"))
+  ) %>%
+  unnest_wider(ci, names_sep = "_")
+
+# 3. Extract Additive architecture only (main figure)
+additive_summary <- lshaped_summary %>%
+  filter(architecture == "Additive")
+
+# Plot: Additive case (main result)
+# False positive rate (L-shaped effects)
+p_additive <- ggplot(lshaped_summary %>% filter(architecture == "Additive"),
+                     aes(x = loci, y = prop, group = maf_filter, color = maf_filter)) +
+  geom_point(size = 3) +
+  geom_line() +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  scale_color_manual(values = okabe_ito_named) +
+  labs(
+    title    = glue("{model}: False Positive Rate in Qst–Fst Comparisons"),
+    subtitle = "L-shaped effect sizes (Additive architecture)\nDashed line = expected type I error (0.05)",
+    x        = "Number of QTLs",
+    y        = "Proportion of false positives",
+    color    = "Dataset"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title    = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 14, face = "italic"),
+    axis.title    = element_text(size = 16, face = "bold"),
+    axis.text     = element_text(size = 13),
+    legend.title  = element_text(size = 14, face = "bold"),
+    legend.text   = element_text(size = 12),
+    strip.text    = element_text(size = 13, face = "bold")
+  )
+
+p_additive
+ggsave(file.path(result_dir, glue("{model}_Figure_Main_Additive_FPR_Lshaped.png")),
+       plot = p_additive, width = 7, height = 5, dpi = 600)
+
+
+p_all_architectures <- ggplot(lshaped_summary,
+                              aes(x = loci, y = prop, group = maf_filter, color = maf_filter)) +
+  geom_point(size = 2) +
+  geom_line() +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  facet_grid(rows = vars(architecture), cols = vars(maf_filter)) +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  scale_color_manual(values = okabe_ito_named) +
+  labs(
+    title    = glue("{model}: False Positive Rate in Qst–Fst Comparisons by Architecture"),
+    subtitle = "L-shaped effect sizes\nDashed line = expected type I error (0.05)",
+    x        = "Number of QTLs",
+    y        = "Proportion of false positives",
+    color    = "Dataset"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title    = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size = 14, face = "italic"),
+    axis.title    = element_text(size = 16, face = "bold"),
+    axis.text     = element_text(size = 12),
+    legend.title  = element_text(size = 14, face = "bold"),
+    legend.text   = element_text(size = 12),
+    strip.text    = element_text(size = 13, face = "bold")
+  )
+
+p_all_architectures
+ggsave(file.path(result_dir, glue("{model}_Supplementary_AllArchitectures_FPR_Lshaped.png")),
+       plot = p_all_architectures, width = 10, height = 8, dpi = 600)
+
+
+```
+
+##Direction of false positive
+```{r}
+direction_summary <- filtered_qst_data %>%
+  filter(p_value < 0.05) %>%  # Keep only significant ones
+  group_by(maf_filter, effect_dist, architecture, loci) %>%
+  summarise(
+    n_positive = sum(significant_positive),
+    n_negative = sum(significant_negative),
+    n_total = n(),
+    prop_positive = n_positive / n_total,
+    prop_negative = n_negative / n_total,
+    .groups = "drop"
+  )
+print(direction_summary, n=Inf)
+
+write.csv(direction_summary, paste0(result_dir,"/direction_summary.csv"), row.names = FALSE)
+
+
+direction_summary <- direction_summary %>%
+  mutate(
+    direction = case_when(
+      prop_positive > 0.5 ~ "Divergent",
+      prop_negative > 0.5 ~ "Stabilizing",
+      TRUE ~ "Mixed"
+    )
+  )
+print(direction_summary, n =Inf)
+write.csv(direction_summary, paste0(result_dir,"/direction_summary.csv"), row.names = FALSE)
+
+summary_counts <- direction_summary %>%
+  group_by(maf_filter, effect_dist, architecture, direction) %>%
+  summarise(n_cases = n(), .groups = "drop") %>%
+  arrange(maf_filter, effect_dist, architecture, direction)
+print(summary_counts, n = Inf)
+
+write.csv(summary_counts, paste0(result_dir,"/summary_count_direction_summary.csv"), row.names = FALSE)
+```
+
+# Maf QTL data
+## Directory and import data
+```{r}
+# Objective:
+#   Analyze Qst–Fst results estimated *only from QTLs that passed MAF filtering*.
+#
+# Why:
+#   - In the previous sections, MAF filtering was applied at the SNP level (Fst).
+#   - Here, we explicitly restrict Qst estimation to a subset of loci that
+#     passed the MAF threshold, allowing a direct comparison with "full QTL" analyses.
+#
+# Steps:
+#   1. Define new base directory for MAF-QTL results.
+#   2. Parse replicate and loci info from filenames (regex).
+#   3. Load metadata and results using helper functions.
+#   4. Remove duplicate replicates if necessary.
+#   5. Merge results with file_info (to recover initial loci count).
+#   6. Store in `maf_qtl_results` instead of reusing `island_results`.
+
+## 1. Directory setup
+maf_qtl_base <- "./500_rep_final/stepping/maf_qst"
+maf_qtl_result_dir <- file.path(maf_qtl_base, "results_2")
+dir.create(maf_qtl_result_dir, showWarnings = FALSE, recursive = TRUE)
+
+## 2. Extract replicate and loci info from file names
+file_names <- list.files("./500_rep_final/island/alleles_maf",
+                         pattern = "maf_filtered",
+                         full.names = FALSE)
+
+file_info <- tibble(file = file_names) %>%
+  mutate(
+    replicate_number = str_extract(file, "Rep_\\d+") %>%
+      str_remove("Rep_") %>%
+      as.integer(),
+    initial_loci = str_extract(file, "_\\d+_loci") %>%
+      str_remove_all("_loci|_") %>%
+      as.integer()
+  )
+
+## 3. Load metadata & results
+maf_qtl_results <- list()
+maf_qtl_results$metadata <- map_df(
+  get_files(maf_qtl_base)$results_files,
+  parse_filename
+)
+
+maf_qtl_results$data <- map_dfr(
+  split(maf_qtl_results$metadata, seq_len(nrow(maf_qtl_results$metadata))),
+  result_reader
+)
+
+## 4. Remove duplicate replicate entries if still present
+maf_qtl_results$data <- maf_qtl_results$data %>%
+  distinct(replicate_number, maf_filter, architecture, effect_dist, loci, .keep_all = TRUE)
+
+## 5. Merge with replicate/loci info
+maf_qtl_results$full_data <- maf_qtl_results$data %>%
+  left_join(file_info, by = "replicate_number")
+
+## 6. Inspect final dataset
+glimpse(maf_qtl_results$full_data)
+```
+
+## Qst analysis (MAF-filtered QTLs)
+```{r}
+# Objective:
+#   Summarize and visualize Qst distributions when *only loci that passed the MAF
+#   threshold* are used to estimate Qst.
+#
+# Why:
+#   - This analysis isolates the effect of working with a MAF-filtered subset
+#     of QTLs (instead of the full set of simulated loci).
+#   - Helps check whether the number of initial loci (before filtering) or the
+#     genetic architecture influences Qst estimates under MAF restriction.
+#
+# Steps:
+#   1. Keep only relevant effect distributions (Normal, L-shaped).
+#   2. Summarize Qst statistics by maf_filter × architecture × effect_dist × initial_loci.
+#   3. Restrict to MAF-filtered Qst estimates (since this block is about maffed QTLs).
+#   4. Visualize capped Qst distributions with violin + boxplots.
+#   5. Save numerical summary and plot.
+
+# 1. Filter relevant effects
+maf_qtl_filtered <- maf_qtl_results$full_data %>%
+  filter(effect_dist %in% c("Normal", "L"))
+
+# 2. Summarize Qst statistics
+qst_summary_stats <- maf_qtl_filtered %>%
+  group_by(maf_filter, architecture, effect_dist, initial_loci) %>%
+  summarise(
+    mean_qst   = mean(QST, na.rm = TRUE),
+    sd_qst     = sd(QST,   na.rm = TRUE),
+    median_qst = median(QST, na.rm = TRUE),
+    min_qst    = min(QST, na.rm = TRUE),
+    max_qst    = max(QST, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Inspect and export
+print(qst_summary_stats, n = Inf)
+write.csv(qst_summary_stats,
+          file = file.path(maf_qtl_result_dir, "qst_summary_stats.csv"),
+          row.names = FALSE)
+
+# 3. Restrict to MAF-filtered Qst estimates
+maf_qst_only <- maf_qtl_filtered %>%
+  filter(maf_filter == "MAF_filtered")
+
+# 4. Cap extreme Qst values (to avoid plotting artefacts)
+plot_data <- maf_qst_only %>%
+  mutate(QST_capped = pmax(pmin(QST, 1), -0.5))
+
+# 5. Violin + boxplots by architecture × initial_loci × effect_dist
+q <- ggplot(maf_qst_only %>% mutate(QST_capped = pmax(pmin(QST, 1), -0.5)),
+            aes(x = architecture, y = QST_capped, fill = architecture, color = architecture)) +
+  geom_violin(trim = FALSE, scale = "width", adjust = 1.5, alpha = 0.7) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, position = position_dodge(width = 0.9)) +
+  facet_grid(rows = vars(effect_dist), cols = vars(loci), labeller = label_both) +
+  scale_fill_manual(values = okabe_ito) +
+  scale_color_manual(values = okabe_ito) +
+  labs(
+    title    = glue("{model}: Qst Distributions by Architecture"),
+    subtitle = "MAF-filtered QTLs only\nEffect size distribution (rows) × Initial loci count (columns)",
+    x        = "Genetic architecture",
+    y        = "Qst (capped between -0.5 and 1)"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title    = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size = 14, face = "italic"),
+    axis.title    = element_text(size = 16, face = "bold"),
+    axis.text.x   = element_text(angle = 90, size = 10, vjust = 0.5, hjust = 1),
+    axis.text.y   = element_text(size = 13),
+    strip.text    = element_text(size = 13, face = "bold"),
+    legend.title  = element_text(size = 14, face = "bold"),
+    legend.text   = element_text(size = 12)
+  )
+
+q
+ggsave(file.path(maf_qtl_result_dir, glue("{model}_Qst_Distribution_MAFQTL.png")),
+       plot = q, width = 12, height = 8, dpi = 600)
+```
+
+## Significance plot (normal)
+```{r}
+# Objective:
+#   Estimate the false positive rate (p < 0.05) for Qst–Fst comparisons
+#   using Qst values derived only from MAF-filtered QTLs, under Normal effect sizes.
+#
+# Steps:
+#   1. Filter dataset to Normal effect sizes.
+#   2. Compute proportion of significant results (p < 0.05) by maf_filter × architecture × initial_loci.
+#   3. Add Wilson confidence intervals.
+#   4. Plot Additive architecture (main figure) and all architectures (supplementary).
+#   5. Save plots for reporting.
+
+# 1. Filter to Normal effect sizes
+normal_data <- maf_qtl_results$full_data %>%
+  filter(effect_dist == "Normal") %>%
+  mutate(significant = p_value < 0.05)
+
+# 2. Compute proportions and CIs
+normal_summary <- normal_data %>%
+  group_by(maf_filter, architecture, loci) %>%
+  summarise(
+    n     = n(),
+    n_sig = sum(significant),
+    prop  = n_sig / n,
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(ci = list(binom.confint(n_sig, n, method = "wilson"))) %>%
+  unnest_wider(ci, names_sep = "_")
+
+# 3. Additive architecture (main figure)
+additive_summary <- normal_summary %>%
+  filter(architecture == "Additive")
+
+# Significance plot (Normal effects, MAF-filtered QTLs)
+p_additive <- ggplot(normal_summary %>% filter(architecture == "Additive"),
+                     aes(x = loci, y = prop, color = maf_filter, group = maf_filter)) +
+  geom_point(size = 3) +
+  geom_line() +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  scale_color_manual(values = okabe_ito_named) +
+  labs(
+    title    = glue("{model}: False Positive Rate in Qst–Fst Comparisons"),
+    subtitle = "Normal effect sizes (MAF-filtered QTLs, Additive architecture)\nDashed line = expected type I error (0.05)",
+    x        = "Number of QTLs (initial set)",
+    y        = "Proportion of false positives",
+    color    = "Dataset"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title    = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 14, face = "italic"),
+    axis.title    = element_text(size = 16, face = "bold"),
+    axis.text     = element_text(size = 13),
+    legend.title  = element_text(size = 14, face = "bold"),
+    legend.text   = element_text(size = 12),
+    strip.text    = element_text(size = 13, face = "bold")
+  )
+
+p_additive
+ggsave(file.path(maf_qtl_result_dir, glue("{model}_Figure_Main_Additive_FPR_Normal_MAFQTL.png")),
+       plot = p_additive, width = 7, height = 5, dpi = 600)
+
+
+p_all_architectures <- ggplot(normal_summary,
+                              aes(x = loci, y = prop, color = maf_filter, group = maf_filter)) +
+  geom_point(size = 2) +
+  geom_line() +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  facet_grid(rows = vars(architecture), cols = vars(maf_filter)) +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  scale_color_manual(values = okabe_ito_named) +
+  labs(
+    title    = glue("{model}: False Positive Rate in Qst–Fst Comparisons by Architecture"),
+    subtitle = "Normal effect sizes (MAF-filtered QTLs)\nDashed line = expected type I error (0.05)",
+    x        = "Number of QTLs (initial set)",
+    y        = "Proportion of false positives",
+    color    = "Dataset"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title    = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic"),
+    axis.title    = element_text(size = 12, face = "bold"),
+    axis.text     = element_text(size = 8),
+    legend.title  = element_text(size = 10, face = "bold"),
+    legend.text   = element_text(size = 8),
+    strip.text    = element_text(size = 9, face = "bold")
+  )
+
+p_all_architectures
+ggsave(file.path(maf_qtl_result_dir, glue("{model}_Supplementary_AllArchitectures_FPR_Normal_MAFQTL.png")),
+       plot = p_all_architectures, width = 16, height = 14, dpi = 600)
+
+```
+#### Significance plot (l-shaped)
+```{r}
+# Objective:
+#   Estimate false positive rates (p < 0.05) under L-shaped effect size distributions,
+#   using Qst derived from MAF-filtered QTLs.
+#
+# Steps are the same as for Normal effects.
+
+# 1. Filter to L-shaped effects
+lshaped_data <- maf_qtl_results$full_data %>%
+  filter(effect_dist == "L") %>%
+  mutate(significant = p_value < 0.05)
+
+# 2. Compute proportions and CIs
+lshaped_summary <- lshaped_data %>%
+  group_by(maf_filter, architecture, loci) %>%
+  summarise(
+    n     = n(),
+    n_sig = sum(significant),
+    prop  = n_sig / n,
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(ci = list(binom.confint(n_sig, n, method = "wilson"))) %>%
+  unnest_wider(ci, names_sep = "_")
+
+# 3. Additive architecture (main figure)
+additive_summary <- lshaped_summary %>%
+  filter(architecture == "Additive")
+
+p_additive <- ggplot(lshaped_summary %>% filter(architecture == "Additive"),
+                     aes(x = loci, y = prop, color = maf_filter, group = maf_filter)) +
+  geom_point(size = 3) +
+  geom_line() +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  scale_color_manual(values = okabe_ito_named) +
+  labs(
+    title    = glue("{model}: False Positive Rate in Qst–Fst Comparisons"),
+    subtitle = "L-shaped effect sizes (MAF-filtered QTLs, Additive architecture)\nDashed line = expected type I error (0.05)",
+    x        = "Number of QTLs (initial set)",
+    y        = "Proportion of false positives",
+    color    = "Dataset"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title    = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size = 14, face = "italic"),
+    axis.title    = element_text(size = 16, face = "bold"),
+    axis.text     = element_text(size = 13),
+    legend.title  = element_text(size = 14, face = "bold"),
+    legend.text   = element_text(size = 12),
+    strip.text    = element_text(size = 13, face = "bold")
+  )
+
+p_additive
+ggsave(file.path(maf_qtl_result_dir, glue("{model}_Figure_Main_Additive_FPR_Lshaped_MAFQTL.png")),
+       plot = p_additive, width = 7, height = 5, dpi = 600)
+
+
+p_all_architectures <- ggplot(lshaped_summary,
+                              aes(x = loci, y = prop, color = maf_filter, group = maf_filter)) +
+  geom_point(size = 2) +
+  geom_line() +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  facet_grid(rows = vars(architecture), cols = vars(maf_filter)) +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  scale_color_manual(values = okabe_ito_named) +
+  labs(
+    title    = glue("{model}: False Positive Rate in Qst–Fst Comparisons by Architecture"),
+    subtitle = "L-shaped effect sizes (MAF-filtered QTLs)\nDashed line = expected type I error (0.05)",
+    x        = "Number of QTLs (initial set)",
+    y        = "Proportion of false positives",
+    color    = "Dataset"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title    = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size = 14, face = "italic"),
+    axis.title    = element_text(size = 16, face = "bold"),
+    axis.text     = element_text(size = 12),
+    legend.title  = element_text(size = 14, face = "bold"),
+    legend.text   = element_text(size = 12),
+    strip.text    = element_text(size = 13, face = "bold")
+  )
+
+p_all_architectures
+ggsave(file.path(maf_qtl_result_dir, glue("/{model}_Supplementary_AllArchitectures_FPR_Lshaped_MAFQTL.png")),
+       plot = p_all_architectures, width = 10, height = 8, dpi = 600)
+```
+## Direction summary
+```{r}
+# Objective:
+#   For significant Qst–Fst tests (p < 0.05), classify whether the bias is
+#   divergent (Qst > Fst), stabilizing (Qst < Fst), or mixed.
+#
+# Steps:
+#   1. Keep significant tests only.
+#   2. Compute positive vs negative proportions by maf_filter × effect_dist × architecture × initial_loci.
+#   3. Assign overall direction.
+#   4. Save detailed and summary tables.
+
+# 1. Keep only significant cases
+direction_summary <- maf_qtl_results$full_data %>%
+  filter(p_value < 0.05) %>%
+  group_by(maf_filter, effect_dist, architecture, initial_loci) %>%
+  summarise(
+    n_positive    = sum(significant_positive),
+    n_negative    = sum(significant_negative),
+    n_total       = n(),
+    prop_positive = n_positive / n_total,
+    prop_negative = n_negative / n_total,
+    .groups = "drop"
+  )
+
+# Inspect
+print(direction_summary, n = Inf)
+
+# Save detailed table
+write.csv(direction_summary,
+          file = file.path(maf_qtl_result_dir, "direction_summary.csv"),
+          row.names = FALSE)
+
+# 2. Assign overall direction
+direction_summary <- direction_summary %>%
+  mutate(
+    direction = case_when(
+      prop_positive > 0.5 ~ "Divergent",
+      prop_negative > 0.5 ~ "Stabilizing",
+      TRUE                ~ "Mixed"
+    )
+  )
+
+# Save updated table
+write.csv(direction_summary,
+          file = file.path(maf_qtl_result_dir, "direction_summary.csv"),
+          row.names = FALSE)
+
+# 3. Summary of counts per direction
+summary_counts <- direction_summary %>%
+  group_by(maf_filter, effect_dist, architecture, direction) %>%
+  summarise(n_cases = n(), .groups = "drop") %>%
+  arrange(maf_filter, effect_dist, architecture, direction)
+
+# Inspect
+print(summary_counts, n = Inf)
+
+# Save summary table
+write.csv(summary_counts,
+          file = file.path(maf_qtl_result_dir, "summary_count_direction_summary.csv"),
+          row.names = FALSE)
+```

@@ -1,10 +1,38 @@
+###############################################################
+# QST–FST Simulation Pipeline
+#
+# Creator:   Isabela Do'Ò
+# Modified by: Jikaël Ntoko
+# Institution: University of Lausanne
+#
+# Description:
+#   This script runs QST–FST simulations using genotype data
+#   exported from SLiM (VCF format). It generates phenotypes
+#   under different genetic architectures (additive, dominance,
+#   recessive, epistatic) and effect size distributions
+#   (Normal, L-shaped), computes QST estimates via nested ANOVA,
+#   and compares them with neutral FST via bootstrap.
+#
+#
+# Outputs:
+#   - Allele frequencies per replicate & population
+#   - Effect size files (Normal, L-shaped)
+#   - QST component estimates
+#   - QST–FST comparison results (p-values, significance)
+#   - MAF-filtered QST results
+#
+# Notes:
+#   - Designed for HPC runs with multiple replicates
+#
+###############################################################
 
+### --- Environment setup --- ###
 Sys.setenv(RENV_CONFIG_SANDBOX_ENABLED = "FALSE")
 
-
+# Load the renv environment
 source("/work/FAC/FBM/DEE/jgoudet/pop_fst/jikael/envs/r_env_jgteach/renv/activate.R")
 
-
+# Add local R libraries (needed for HPC cluster)
 .libPaths("/work/FAC/FBM/DEE/jgoudet/pop_fst/jikael/envs/r_env_jgteach/renv/library/linux-ubuntu-jammy/R-4.4/x86_64-pc-linux-gnu")
 library(tidyverse)
 library(hierfstat)
@@ -15,25 +43,29 @@ library(vcfR)
 library(VGAM)
 library(data.table)
 library(gaston)
-
+# Fix random seed for reproducibility
 set.seed(123)
 
-#### Get correct file from command line arguments
+### --- Input arguments --- ###
+# Read replicate index from command line
 args <- commandArgs(trailingOnly = TRUE)
 file_index <- as.numeric(args[1])
 
+# Locate correct VCF file from simulation directory
 Simulation_directory <-"/scratch/jntoko/vcf_output/stepping/"
 Neutral_file_name <- list.files(path = Simulation_directory, pattern = "*.vcf", full.names = TRUE)
 file <- Neutral_file_name[file_index]
 
+# Replicate number = file index
 replicate_number <- file_index
 
-### Declare and create output directories
+### --- Output directory structure --- ###
+# Root directory for this replicate
 rep_dir <- file.path("/scratch/jntoko/results_GW_final_stepping", paste0("Rep_", replicate_number))
 dir.create(rep_dir, recursive = TRUE, showWarnings = FALSE)
 
 
-
+# Subdirectories for results
 outdir <- rep_dir
 
 outdir_alleles <- file.path(outdir, "alleles")
@@ -60,7 +92,7 @@ if (!dir.exists(outdir_dif_maf_qst)) {
   dir.create(outdir_dif_maf_qst, recursive = TRUE)
 }
 
-### define constants
+### --- Simulation constants --- ###
 ns <- 10  # Number of sires
 nd <- 10  # Number of dams
 no <- 2  # Number of offspring per pair
@@ -68,9 +100,20 @@ n_loci_qtl_list <- c(1,2,5,10,100,1000)  # Number of QTLs
 maplength_quanti <- 50  # Map length for drop along ped
 np <- 8
 
-# variable replicate
+# Replicate ID
 replicate_number <- file_index
 
+###############################################################
+### --- Helper functions --- ###
+###############################################################
+
+#--------------------------------------------------------------
+# Function: compute_maf_dos
+# Purpose : Compute minor allele frequency (MAF) from dosage matrix
+# Input   : dosage_matrix (individuals × loci, values 0/1/2),
+#           threshold (default 0.05),
+#           return_maf (if TRUE, also return maf values).
+# Output  : Either filtered dosage matrix, or list(matrix, maf).
 compute_maf_dos <- function(dosage_matrix, threshold = 0.05, return_maf = FALSE) {
   # Compute allele frequency from dosage (0, 1, 2)
   allele_freq <- colMeans(dosage_matrix, na.rm = TRUE) / 2
@@ -90,6 +133,14 @@ compute_maf_dos <- function(dosage_matrix, threshold = 0.05, return_maf = FALSE)
   }
 }
 
+#--------------------------------------------------------------
+# Function: generate_effect_matrix
+# Purpose : Convert genotype matrix to effect matrix
+# Input   : geno_matrix (dosage: 0/1/2),
+#           effect_vector (effect sizes per locus),
+#           h (dominance coefficients, default = 0.5).
+# Output  : effect_matrix (individual × loci contributions).
+#--------------------------------------------------------------
 generate_effect_matrix <- function(geno_matrix, effect_vector, h = rep(0.5, length(effect_vector))) {
   effect_matrix <- matrix(0, nrow = nrow(geno_matrix), ncol = ncol(geno_matrix))
   
@@ -107,7 +158,14 @@ generate_effect_matrix <- function(geno_matrix, effect_vector, h = rep(0.5, leng
   return(effect_matrix)
 }
 
-# Function to compute epistatic phenotype
+#--------------------------------------------------------------
+# Function: compute_epistatic_phenotype
+# Purpose : Compute phenotype with additive + pairwise epistatic effects
+# Input   : dos_matrix (genotypes in dosage format),
+#           additive_effects (vector of additive effects),
+#           epi_effect_matrix (locus × locus interaction effects).
+# Output  : phenotype vector (per individual).
+#--------------------------------------------------------------
 compute_epistatic_phenotype <- function(dos_matrix, additive_effects, epi_effect_matrix) {
   n_loci <- ncol(dos_matrix)
   n_individuals <- nrow(dos_matrix)
@@ -129,6 +187,12 @@ compute_epistatic_phenotype <- function(dos_matrix, additive_effects, epi_effect
   return(phenotype)
 }
 
+#--------------------------------------------------------------
+# Function: compute_allele_freq
+# Purpose : Compute allele frequencies per locus across all individuals.
+# Input   : genotype matrix (dosage).
+# Output  : allele frequency vector (per locus).
+#--------------------------------------------------------------
 compute_allele_freq <- function(geno_matrix) {
   allele_freqs <- apply(geno_matrix, 2, function(col) {
     sum(col, na.rm = TRUE) / (2 * sum(!is.na(col)))
@@ -136,6 +200,12 @@ compute_allele_freq <- function(geno_matrix) {
   return(allele_freqs)
 }
 
+#--------------------------------------------------------------
+# Function: compute_allele_freq_by_pop
+# Purpose : Compute allele frequencies per population.
+# Input   : geno_matrix (dosage), pop_vector (population IDs).
+# Output  : matrix of allele frequencies (pop × loci).
+#--------------------------------------------------------------
 compute_allele_freq_by_pop <- function(geno_matrix, pop_vector) {
   pops <- unique(pop_vector)
   
@@ -156,6 +226,13 @@ compute_allele_freq_by_pop <- function(geno_matrix, pop_vector) {
   return(freq_matrix)
 }
 
+#--------------------------------------------------------------
+# Function: save_allele_freqs
+# Purpose : Save allele frequencies (global + per-population).
+# Input   : genotype matrix, population vector, replicate ID,
+#           output directory, prefix, number of loci, maf flag.
+# Output  : CSV file with allele frequencies.
+#--------------------------------------------------------------
 save_allele_freqs <- function(outdir_alleles, geno_matrix, pop_vector, replicate_number, prefix = "maf", n_loci_qtl = NULL, maf = FALSE) {
   # 1. Compute global and per-population allele frequencies
   global_allele_freq <- compute_allele_freq(geno_matrix)
@@ -192,6 +269,12 @@ save_allele_freqs <- function(outdir_alleles, geno_matrix, pop_vector, replicate
   }
 }
 
+#--------------------------------------------------------------
+# Function: generate_epistatic_phenotypes
+# Purpose : Generate phenotypes under epistasis for Normal & L effects.
+# Input   : dos_matrix (dosage), normal_effect, l_effect.
+# Output  : list(epi_norm_phenotype, epi_l_phenotype).
+#--------------------------------------------------------------
 generate_epistatic_phenotypes <- function(dos_matrix, normal_effect, l_effect) {
   n_loci_qtl <- ncol(dos_matrix)
   
@@ -231,29 +314,15 @@ generate_epistatic_phenotypes <- function(dos_matrix, normal_effect, l_effect) {
   ))
 }
 
-compute_epistatic_phenotype <- function(dos_matrix, additive_effects, epi_effect_matrix) {
-  n_loci <- ncol(dos_matrix)
-  n_individuals <- nrow(dos_matrix)
-  
-  phenotype <- rep(0, n_individuals)
-  
-  # --- Epistatic part ---
-  for (i in 1:(n_loci-1)) {
-    for (j in (i+1):n_loci) {
-      interaction_term <- dos_matrix[, i] * dos_matrix[, j]
-      phenotype <- phenotype + interaction_term * epi_effect_matrix[i, j]
-    }
-  }
-  
-  # --- Additive part ---
-  additive_contribution <- as.vector(dos_matrix %*% additive_effects)
-  phenotype <- phenotype + additive_contribution
-  
-  return(phenotype)
-}
 
+
+
+###############################################################
+### --- Import VCF file and process on the simulation --- ###
+###############################################################
 
 ####---- Simulation ----####
+
 if (!file.exists(file)) stop("File not found: ", file)
 ## -- data import -- ##
 vcf <- read.vcfR(file)
@@ -351,7 +420,7 @@ n_ind <- no * ns * nd * np #total number of individuals F1
 indperpop <- 1000 #Original population size (before sampling)
 
 
-#-----------------
+
 
 #--------- Generate F1 generation
 founder_data <- founder_data[, sample(ncol(founder_data), replace = FALSE)] # randomly shuffle 
