@@ -21,19 +21,33 @@ The repository provides:
 
 
 ├── scripts/ # Core pipeline code
+
 │ ├── Full_code_analysis_Qst_Fst.Rmd # Analysis and visualization of final results
+
 │ ├── GW_Qst_Fst.r # Main algorithm (Guillaume–Whitlock framework)
+
 │ ├── process_stepping_tree.py # Tree → VCF (stepping-stone model)
+
 │ ├── process_tree_island.py # Tree → VCF (island model)
+
 │ ├── run_batch_vcf.sh # Parallel VCF processing launcher
+
 │ ├── run_one_vcf.sh # Single execution of tree → VCF
+
 │ ├── run_one_seed.sh # Single SLiM simulation run
+
 │ ├── run_slim_batch.sh # Array job: multiple SLiM simulations
+
 │ ├── run_one_qst.sh # Single Qst–Fst analysis (R)
+
 │ ├── run_qst_fst.sh # Batch Qst–Fst analysis (SLURM array)
+
 │
+
 ├── slim_script/ # Forward simulations in SLiM
+
 │ ├── island_neutral.slim # Island model simulation
+
 │ ├── stepping_neutral.slim # Stepping-stone model simulation
 
 
